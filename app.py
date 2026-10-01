@@ -13,8 +13,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# Importa o motor modular de cálculo e análise
-from poker_engine import run_poker_leak_engine
+# Importa o motor modular de cálculo e normalização
+from poker_engine import run_poker_leak_engine, normalizar_valor
 
 # ---------------------------------------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA
@@ -191,6 +191,11 @@ if result:
         st.success("✅ Processamento concluído com sucesso!")
         enriched_data = result.get("enriched_data", [])
         df = pd.DataFrame(enriched_data)
+
+        # Garante normalização estrita de todas as colunas de valor no DataFrame
+        for col in ["net_bb", "stack_bb", "spr"]:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda v: normalizar_valor(v, origem="csv"))
 
         # ── CARDS DE MÉTRICAS EXECUTIVAS ─────────────────────────────────────
         st.markdown("#### 📊 2. Resumo Executivo das Perdas (>20BB)")

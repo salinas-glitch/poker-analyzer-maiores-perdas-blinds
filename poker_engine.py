@@ -1,6 +1,6 @@
 """
 =============================================================================
-  POKER LEAK ENGINE (MOTOR DE CÁLCULO E ANÁLISE) v2.5
+  POKER LEAK ENGINE (MOTOR DE CÁLCULO E ANÁLISE) v2.6
   Módulo independente de cálculo, avaliação de mãos e geração do dashboard.
 =============================================================================
 """
@@ -72,55 +72,78 @@ def _cell(ws, r, c, v, bg, fg="222222", bold=False, align="center", fmt=None, sz
     if fmt: cell.number_format = fmt
     return cell
 
-def safe_float(v, d=0.0):
+# ---------------------------------------------------------------------------
+# NORMALIZAÇÃO DE VALORES NUMÉRICOS (CSV vs TXT)
+# ---------------------------------------------------------------------------
+def normalizar_valor(valor, origem: str, default: float = 0.0) -> float:
     """
-    Converte valores numéricos de forma robusta, suportando formatos brasileiros
-    e internacionais (1.234,56 ou 1,234.56), remoção de símbolos ($ ou BB) e
-    valores negativos entre parênteses.
+    Normaliza valores numéricos conforme a origem do dado para eliminar inconsistências:
+    
+    1. Se a origem for 'csv' (Relatórios do PT4, Hand2Note, CoinPoker, etc.):
+       - O ponto (.) representa o separador decimal puro (ex: 12.50 ou -162.59).
+       - Remove eventuais vírgulas de milhar (ex: 1,234.50 -> 1234.50).
+       - Converte para float puro (padrão Python).
+       
+    2. Se a origem for 'txt' (Logs brutos de Histórico de Mãos):
+       - O ponto (.) representa o separador de milhar (ex: 1.234,50 ou 1.234 ou 19.790).
+       - Remove os pontos de milhar e substitui a vírgula decimal (,) por ponto (.).
+       - Converte para float puro (padrão Python).
     """
-    if v is None:
-        return d
+    if valor is None:
+        return default
     try:
-        s = str(v).strip()
+        s = str(valor).strip()
         if not s or s.lower() in ("none", "nan", "null", ""):
-            return d
+            return default
 
-        # Tratamento de parênteses como negativo: (123.45) -> -123.45
-        is_negative = False
+        # Tratamento de parênteses como negativo: (12.50) -> -12.50
+        is_neg = False
         if s.startswith("(") and s.endswith(")"):
-            is_negative = True
+            is_neg = True
             s = s[1:-1].strip()
+        elif s.startswith("-"):
+            is_neg = True
+            s = s[1:].strip()
+        elif s.startswith("+"):
+            s = s[1:].strip()
 
-        # Remove caracteres indesejados comuns
-        s = re.sub(r"[^\d.,\-+]", "", s)
+        # Remove caracteres indesejados (moedas, unidades, BB, fichas, espaços)
+        s = re.sub(r"[^\d.,]", "", s)
         if not s:
-            return d
+            return default
 
-        # Se houver ambos '.' e ','
-        if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."):
-                # Padrão Brasileiro/Europeu: 1.234,56
-                s = s.replace(".", "").replace(",", ".")
-            else:
-                # Padrão Americano: 1,234.56
+        origem_clean = str(origem).strip().lower()
+
+        if "txt" in origem_clean or "log" in origem_clean:
+            # ORIGEM TXT:
+            # Ponto (.) é separador de milhar -> remove todos
+            # Vírgula (,) é separador decimal -> converte em ponto
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            # ORIGEM CSV:
+            # Ponto (.) é separador decimal puro
+            if "," in s and "." in s:
+                # Vírgula é milhar (1,234.50) -> remove vírgula
                 s = s.replace(",", "")
-        elif "," in s:
-            # Apenas vírgula: vírgula decimal
-            s = s.replace(",", ".")
+            elif "," in s and "." not in s:
+                # Vírgula decimal isolada (12,50) -> converte em ponto
+                s = s.replace(",", ".")
 
         val = float(s)
-        return -val if is_negative else val
-    except:
-        return d
+        return -val if is_neg else val
+    except Exception:
+        return default
+
+def safe_float(v, d=0.0):
+    """Alias retrocompatível delegando para normalizar_valor com origem='csv'."""
+    return normalizar_valor(v, origem="csv", default=d)
 
 def get_col_val(row: dict, aliases: list, default=""):
     """Busca o valor da primeira coluna compatível presente no dicionário."""
-    # Busca exata primeiro
     for a in aliases:
         if a in row and row[a] is not None:
             v = str(row[a]).strip()
             if v: return v
-    # Busca case-insensitive
     lower_map = {k.lower(): v for k, v in row.items()}
     for a in aliases:
         al = a.lower()
@@ -204,7 +227,7 @@ def evaluate_flop(hole_str, board_str):
     # 6. Dois pares
     if len(pairs) >= 2: return "Dois pares", has_fd
 
-    # 7. Pares (Overpair > Top par > Segundo par > Par baixo > Underpair)
+    # 7. Pares
     if pairs:
         pr = pairs[0]
         is_pocket = (h_rnks[0] == h_rnks[1])
@@ -267,7 +290,7 @@ def hand_category(cards_str):
     return "Marginais Suited" if suited else "Marginais Offsuit"
 
 def classify_stack_depth(stack_bb):
-    v = safe_float(stack_bb)
+    v = normalizar_valor(stack_bb, origem="csv")
     if v < 10:  return "Short (<10BB)"
     if v < 20:  return "Micro (10-20BB)"
     if v < 40:  return "Medium (20-40BB)"
@@ -275,9 +298,12 @@ def classify_stack_depth(stack_bb):
     return "Very Deep (80BB+)"
 
 def calc_spr(hero_chips, hero_invested, pot_total):
-    stack = safe_float(hero_chips)
+    stack = normalizar_valor(hero_chips, origem="csv")
     if stack <= 0: return None
-    pot = safe_float(pot_total) if pot_total else safe_float(hero_invested) * 2
+    if pot_total is not None:
+        pot = normalizar_valor(pot_total, origem="txt")
+    else:
+        pot = normalizar_valor(hero_invested, origem="csv") * 2
     if pot <= 0: return None
     return round(pot / stack, 3)
 
@@ -343,12 +369,13 @@ def _winner_hand_from_block(block, plat):
     return "Sem Showdown (Hero fold)"
 
 def _extract_pot_total(block, plat):
+    """Extrai pot total de logs TXT normalizando com origem='txt' (ponto de milhar)."""
     if plat == "PartyPoker":
-        m = re.search(r"Main Pot: ([\d,]+)", block)
-        return safe_float(m.group(1)) if m else None
+        m = re.search(r"Main Pot: ([\d,.]+)", block)
+        return normalizar_valor(m.group(1), origem="txt") if m else None
     m = re.search(r"Total pot ([\d,. ]+)\|", block)
     if not m: m = re.search(r"Total pot ([\d,. ]+)", block)
-    if m: return safe_float(m.group(1).split("|")[0])
+    if m: return normalizar_valor(m.group(1).split("|")[0], origem="txt")
     return None
 
 def enrich_from_logs(target_ids: set, search_dirs: list):
@@ -441,8 +468,9 @@ def load_and_enrich_data(csv_paths, log_dirs):
         pfa_raw = ext.get("pf_aggressor")
         pfa_sim_nao = ("Sim" if pfa_raw else "Não") if pfa_raw is not None else "?"
 
-        hero_chips = safe_float(get_col_val(row, ["hero_chips", "Hero Chips", "Starting Chips", "Stack", "Chips"]))
-        hero_inv   = safe_float(get_col_val(row, ["hero_invested", "Invested", "Hero Invested", "Total Invested"]))
+        # NORMALIZAÇÃO DE COLUNAS DE VALORES DO CSV:
+        hero_chips = normalizar_valor(get_col_val(row, ["hero_chips", "Hero Chips", "Starting Chips", "Stack", "Chips"]), origem="csv")
+        hero_inv   = normalizar_valor(get_col_val(row, ["hero_invested", "Invested", "Hero Invested", "Total Invested"]), origem="csv")
         pot_total  = ext.get("pot_total")
         spr        = calc_spr(hero_chips, hero_inv, pot_total)
 
@@ -458,15 +486,15 @@ def load_and_enrich_data(csv_paths, log_dirs):
 
         flop_strength, fd_flag = evaluate_flop(cards, board_str)
 
-        net_bb = safe_float(get_col_val(row, ["net_bb", "All-In Adj BB", "Net BB", "Net (BB)", "Net Won (BB)"]))
+        # NORMALIZAÇÃO DE RESULTADO E STACK (CSV):
+        net_bb = normalizar_valor(get_col_val(row, ["net_bb", "All-In Adj BB", "Net BB", "Net (BB)", "Net Won (BB)"]), origem="csv")
         went_ai_str = get_col_val(row, ["went_allin", "Went All-in", "All-in", "Went All In", "AllIn"], "False")
         went_ai = went_ai_str.lower() in ("true", "1", "sim", "yes", "t", "s")
         ai_street = get_col_val(row, ["all_in_street", "AI Street", "All-in Street", "Street All-In"], "N/A")
         
-        stack_bb  = safe_float(get_col_val(row, ["stack_depth_bb", "Stack Depth BB", "Stack (BB)", "Stack BB"]))
+        stack_bb  = normalizar_valor(get_col_val(row, ["stack_depth_bb", "Stack Depth BB", "Stack (BB)", "Stack BB"]), origem="csv")
         if stack_bb == 0.0 and hero_chips > 0:
-            # Estimativa caso stack depth não venha pré-calculado
-            bb_val = safe_float(get_col_val(row, ["big_blind", "Big Blind", "BB"]), 1.0)
+            bb_val = normalizar_valor(get_col_val(row, ["big_blind", "Big Blind", "BB"]), origem="csv", default=1.0)
             stack_bb = round(hero_chips / bb_val, 1) if bb_val > 0 else 0.0
 
         hero_final  = ext.get("hero_hand") or get_col_val(row, ["hero_hand_desc", "Final Hand", "Hero Hand"]) or "N/A"
@@ -507,7 +535,7 @@ def build_cover(ws):
     ws.sheet_properties.tabColor = THEME["cover_bg"]
 
     title(ws, 2, 1, "DASHBOARD DE LEAKS — POKER MTT (WEB APP & PIPELINE)", THEME["cover_bg"], span=5, sz=15)
-    title(ws, 3, 1, "Consolidação e Diagnóstico de Perdas Severas (>20BB) • Poker Leak Engine v2.5", "1B2A4A", span=5, sz=9)
+    title(ws, 3, 1, "Consolidação e Diagnóstico de Perdas Severas (>20BB) • Poker Leak Engine v2.6", "1B2A4A", span=5, sz=9)
 
     ws.row_dimensions[2].height = 28
     ws.row_dimensions[3].height = 16
@@ -519,11 +547,11 @@ def build_cover(ws):
         (8,  "🛣️   Aba 3 — RUAS: Em qual rua o dinheiro é colocado e perdido (All-in por rua).", "0A192F", "E0E6ED", 9, False),
         (9,  "🃏  Aba 4 — PERFIL: Por categoria de mão pré-flop — onde você é dominado.", "0A192F", "E0E6ED", 9, False),
         (10, "🔬  Aba 5 — ESTRUTURAL: Agressor PF (Sim/Não) × SPR × IP/OOP × Força no Flop × Piores Confrontos.", "0A192F", "E0E6ED", 9, False),
-        (12, "METODOLOGIA E DEFINIÇÕES", "1B2A4A", "FFFFFF", 11, True),
-        (13, "• Net BB = Saldo líquido da mão normalizado pelo valor do Big Blind (Fonte Primária: Logs individuais).", "0A192F", "E0E6ED", 9, False),
-        (14, "• Agressor PF = Identificado via análise de raises do Hero entre as cartas dadas e o flop.", "0A192F", "E0E6ED", 9, False),
-        (15, "• SPR Index = Razão (Pot no momento da decisão / Stack do Hero).", "0A192F", "E0E6ED", 9, False),
-        (16, "• Força no Flop = Avaliador estrito das 5 cartas (Hole + Flop) em categorias mutuamente exclusivas.", "0A192F", "E0E6ED", 9, False),
+        (12, "METODOLOGIA E NORMALIZAÇÃO DE DADOS", "1B2A4A", "FFFFFF", 11, True),
+        (13, "• Net BB = Saldo líquido da mão normalizado pelo valor do Big Blind (CSV com ponto decimal puro).", "0A192F", "E0E6ED", 9, False),
+        (14, "• Pot/Chips nos Logs TXT = Tratamento diferenciado com remoção de ponto de milhar e vírgula decimal.", "0A192F", "E0E6ED", 9, False),
+        (15, "• Agressor PF = Identificado via análise de raises do Hero entre as cartas dadas e o flop.", "0A192F", "E0E6ED", 9, False),
+        (16, "• SPR Index = Razão (Pot no momento da decisão / Stack do Hero).", "0A192F", "E0E6ED", 9, False),
     ]
 
     for r_num, txt, bg, fg, sz, bld in lines:
@@ -550,13 +578,13 @@ def build_aba1_ranking(ws, enriched):
     headers = ["#", "Hand ID", "Site", "Posição", "Hole Cards", "Board", "Net BB", "Agressor PF?", "Mão Final Hero", "Mão Vencedora"]
     hdr(ws, 3, headers, "4E1D00")
 
-    sorted_rows = sorted(enriched, key=lambda r: r["net_bb"])
+    sorted_rows = sorted(enriched, key=lambda r: normalizar_valor(r.get("net_bb", 0), origem="csv"))
     top50 = sorted_rows[:50]
     medals = {1: fill("FFD700"), 2: fill("C0C0C0"), 3: fill("CD7F32")}
 
     for i, row in enumerate(top50, 1):
         r = i + 3
-        nb = row["net_bb"]
+        nb = normalizar_valor(row["net_bb"], origem="csv")
         row_bg = medals[i] if i in medals else fill(THEME["even_row"] if i % 2 == 0 else THEME["odd_row"])
         txt_col = "1A1A2E" if i <= 3 else ("880000" if nb <= -80 else "222222")
 
@@ -599,13 +627,14 @@ def build_aba2_matrix(ws, enriched):
     title(ws, 3, 1, "A — PERDAS POR POSIÇÃO", "2E1B4E", span=6, sz=11)
     hdr(ws, 4, ["Posição", "Nº Mãos", "Net BB Total", "Net BB Médio", "% das Perdas", "Pior Mão"], "4A235A")
     pos_map = defaultdict(lambda: {"n": 0, "tot": 0.0, "worst": 0.0})
-    tot_loss = sum(r["net_bb"] for r in enriched)
+    tot_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in enriched)
 
     for r in enriched:
         k = r["position"] or "?"
+        nb = normalizar_valor(r["net_bb"], origem="csv")
         pos_map[k]["n"] += 1
-        pos_map[k]["tot"] += r["net_bb"]
-        pos_map[k]["worst"] = min(pos_map[k]["worst"], r["net_bb"])
+        pos_map[k]["tot"] += nb
+        pos_map[k]["worst"] = min(pos_map[k]["worst"], nb)
 
     pos_order = ["UTG", "UTG+1", "EP", "MP", "MP+1", "CO", "BTN", "SB", "BB", "?"]
     curr_r = 5
@@ -634,9 +663,10 @@ def build_aba2_matrix(ws, enriched):
     stk_map = defaultdict(lambda: {"n": 0, "tot": 0.0, "worst": 0.0})
     for r in enriched:
         k = r["stack_cat"]
+        nb = normalizar_valor(r["net_bb"], origem="csv")
         stk_map[k]["n"] += 1
-        stk_map[k]["tot"] += r["net_bb"]
-        stk_map[k]["worst"] = min(stk_map[k]["worst"], r["net_bb"])
+        stk_map[k]["tot"] += nb
+        stk_map[k]["worst"] = min(stk_map[k]["worst"], nb)
 
     stk_order = ["Short (<10BB)", "Micro (10-20BB)", "Medium (20-40BB)", "Deep (40-80BB)", "Very Deep (80BB+)"]
     for sc in stk_order:
@@ -669,13 +699,14 @@ def build_aba3_streets(ws, enriched):
     hdr(ws, 4, ["Rua", "Nº Mãos", "Perda Total (BB)", "Perda Média (BB)", "% das Perdas", "Pior Mão"], "0E6251")
 
     street_map = defaultdict(lambda: {"n": 0, "tot": 0.0, "worst": 0.0})
-    tot_loss = sum(r["net_bb"] for r in enriched)
+    tot_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in enriched)
 
     for r in enriched:
         st = r["ai_street"].upper() if r["went_allin"] == "Sim" and r["ai_street"] != "N/A" else "Sem All-In"
+        nb = normalizar_valor(r["net_bb"], origem="csv")
         street_map[st]["n"] += 1
-        street_map[st]["tot"] += r["net_bb"]
-        street_map[st]["worst"] = min(street_map[st]["worst"], r["net_bb"])
+        street_map[st]["tot"] += nb
+        street_map[st]["worst"] = min(street_map[st]["worst"], nb)
 
     st_order = ["PREFLOP", "FLOP", "TURN", "RIVER", "Sem All-In"]
     st_colors = {"PREFLOP": "1565C0", "FLOP": "2E7D32", "TURN": "E65100", "RIVER": "B71C1C", "Sem All-In": "607D8B"}
@@ -710,13 +741,14 @@ def build_aba4_hand_profile(ws, enriched):
     hdr(ws, 3, ["Categoria de Mão", "Nº Mãos", "Perda Total (BB)", "Perda Média (BB)", "% das Perdas", "Pior Mão"], "145A32")
 
     cat_map = defaultdict(lambda: {"n": 0, "tot": 0.0, "worst": 0.0})
-    tot_loss = sum(r["net_bb"] for r in enriched)
+    tot_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in enriched)
 
     for r in enriched:
         k = r["hand_cat"]
+        nb = normalizar_valor(r["net_bb"], origem="csv")
         cat_map[k]["n"] += 1
-        cat_map[k]["tot"] += r["net_bb"]
-        cat_map[k]["worst"] = min(cat_map[k]["worst"], r["net_bb"])
+        cat_map[k]["tot"] += nb
+        cat_map[k]["worst"] = min(cat_map[k]["worst"], nb)
 
     cat_order = [
         "Premium Offsuit", "Premium Suited", "Pares Medios (55-99)", "Pares Baixos (22-44)",
@@ -779,13 +811,13 @@ def build_aba5_structural(ws, enriched):
     ]
     hdr(ws, 5, col_headers, "4E1D00")
 
-    sorted_e = sorted(enriched, key=lambda x: x["net_bb"])
+    sorted_e = sorted(enriched, key=lambda x: normalizar_valor(x["net_bb"], origem="csv"))
     for i, row in enumerate(sorted_e, 1):
         r = 5 + i
         agg = row["pf_aggressor"]
         ip_oop = row["ip_oop"]
         fstrength = row["flop_strength"]
-        net_bb = row["net_bb"]
+        net_bb = normalizar_valor(row["net_bb"], origem="csv")
 
         bg_base = THEME["even_row"] if (i % 2 == 0) else THEME["odd_row"]
         agg_bg = "1565C0" if agg == "Sim" else ("D84315" if agg == "Não" else "757575")
@@ -832,13 +864,13 @@ def build_aba5_structural(ws, enriched):
     s2_r += 1
 
     for cat_filter in ["Premium Offsuit", "Premium Suited"]:
-        total_cat_loss = sum(r["net_bb"] for r in enriched if r["hand_cat"] == cat_filter)
+        total_cat_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in enriched if r["hand_cat"] == cat_filter)
         for agg_val in ["Sim", "Não"]:
             sub = [r for r in enriched if r["hand_cat"] == cat_filter and r["pf_aggressor"] == agg_val]
             if not sub: continue
-            tot_loss = sum(r["net_bb"] for r in sub)
+            tot_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in sub)
             avg_loss = tot_loss / len(sub)
-            worst    = min(r["net_bb"] for r in sub)
+            worst    = min(normalizar_valor(r["net_bb"], origem="csv") for r in sub)
             pct      = 100 * tot_loss / total_cat_loss if total_cat_loss else 0
             ip_c     = sum(1 for r in sub if r["ip_oop"] == "IP")
             oop_c    = sum(1 for r in sub if r["ip_oop"] == "OOP")
@@ -869,9 +901,10 @@ def build_aba5_structural(ws, enriched):
     conf_map = defaultdict(lambda: {"n": 0, "tot": 0.0, "worst": 0.0})
     for r in enriched:
         cf = r["confronto"]
+        nb = normalizar_valor(r["net_bb"], origem="csv")
         conf_map[cf]["n"] += 1
-        conf_map[cf]["tot"] += r["net_bb"]
-        conf_map[cf]["worst"] = min(conf_map[cf]["worst"], r["net_bb"])
+        conf_map[cf]["tot"] += nb
+        conf_map[cf]["worst"] = min(conf_map[cf]["worst"], nb)
 
     sorted_confs = sorted(conf_map.items(), key=lambda x: x[1]["tot"])
     showdown_loss = sum(v["tot"] for k, v in conf_map.items() if "Sem Showdown" not in k)
@@ -914,7 +947,7 @@ def build_aba5_structural(ws, enriched):
 def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
     """
     Função principal do motor de poker:
-    1. Carrega CSVs e enriquece com logs detalhados
+    1. Carrega CSVs e enriquece com logs detalhados (aplicando normalizar_valor diferenciado)
     2. Constrói as 6 abas do dashboard
     3. Salva o arquivo Excel formatado (em disco ou em memória BytesIO)
     4. Retorna relatório executivo completo + registros enriquecidos para preview no app
@@ -962,14 +995,14 @@ def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
 
     # Métricas executivas
     tot_hands = len(enriched)
-    tot_loss = sum(r["net_bb"] for r in enriched)
+    tot_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in enriched)
     avg_loss = tot_loss / tot_hands if tot_hands else 0
-    worst_hand = min(r["net_bb"] for r in enriched) if enriched else 0
+    worst_hand = min(normalizar_valor(r["net_bb"], origem="csv") for r in enriched) if enriched else 0
 
     prem_off = [r for r in enriched if r["hand_cat"] == "Premium Offsuit"]
     po_agg = sum(1 for r in prem_off if r["pf_aggressor"] == "Sim")
     po_cal = sum(1 for r in prem_off if r["pf_aggressor"] == "Não")
-    po_loss = sum(r["net_bb"] for r in prem_off)
+    po_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in prem_off)
 
     return {
         "success": True,
