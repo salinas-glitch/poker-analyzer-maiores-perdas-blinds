@@ -1,0 +1,6 @@
+﻿secao,status,detalhe,threshold,timestamp
+4.1 - Soma Manual vs Normalizada,APROVADO,Amostra=20 registros | Soma normalizada=-8235.7200 BB | Re-parse=-8235.7200 BB | Delta=0.000000,delta < 0.01 BB,2026-10-07 18:47:30
+4.2 - Integridade de Sinal,APROVADO,Nenhum net_bb positivo encontrado.,net_bb < 0 em todos os registros de perdas,2026-10-07 18:47:30
+4.3 - Outlier Check (Magnitude),AVISO,"8 registro(s) com |net_bb| > 500.0 BB. Verificacao manual recomendada: =-559.22, =-737.29, =-891.24, =-615.45, =-712.13",|net_bb| <= 500.0 BB,2026-10-07 18:47:30
+4.4 - Consistencia Cross-Source (por plataforma),INFO,Soma net_bb por plataforma: =-12996.46 BB | CoinPoker=-1068.93 BB | GGPoker=-5424.59 BB | PartyPoker=-943.15 BB | PokerStars=-1067.90 BB,Referencia para auditoria manual futura,2026-10-07 18:47:30
+TOTAIS EXECUTIVOS,INFO,Total registros=189 | Soma total net_bb=-21501.03 BB | Media=-113.76 BB/mao | Pior=-6498.23 BB,N/A,2026-10-07 18:47:30

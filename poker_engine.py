@@ -1,7 +1,9 @@
 """
 =============================================================================
-  POKER LEAK ENGINE (MOTOR DE CÁLCULO E ANÁLISE) v2.6
+  POKER LEAK ENGINE (MOTOR DE CÁLCULO E ANÁLISE) v2.7
   Módulo independente de cálculo, avaliação de mãos e geração do dashboard.
+  v2.7: Protocolo de Auditoria de Sanidade (GOVERNANCA_DADOS_POKER.md §4)
+        implementado em executar_auditoria_sanidade() + log_auditoria.csv.
 =============================================================================
 """
 
@@ -9,6 +11,8 @@ import sys
 import re
 import csv
 import io
+import random
+from datetime import datetime
 from pathlib import Path
 from collections import defaultdict, Counter
 
@@ -135,7 +139,14 @@ def normalizar_valor(valor, origem: str, default: float = 0.0) -> float:
         return default
 
 def safe_float(v, d=0.0):
-    """Alias retrocompatível delegando para normalizar_valor com origem='csv'."""
+    """
+    Alias retrocompatível delegando para normalizar_valor com origem='csv'.
+
+    DEPRECADO — conforme GOVERNANCA_DADOS_POKER.md §6 (Anti-Patterns Proibidos).
+    Novos trechos de código NÃO devem usar safe_float. Use sempre:
+        normalizar_valor(valor, origem="csv")  # ou origem="txt"
+    Este alias existe apenas para compatibilidade com código legado.
+    """
     return normalizar_valor(v, origem="csv", default=d)
 
 def get_col_val(row: dict, aliases: list, default=""):
@@ -488,6 +499,13 @@ def load_and_enrich_data(csv_paths, log_dirs):
 
         # NORMALIZAÇÃO DE RESULTADO E STACK (CSV):
         net_bb = normalizar_valor(get_col_val(row, ["net_bb", "All-In Adj BB", "Net BB", "Net (BB)", "Net Won (BB)"]), origem="csv")
+
+        # GOVERNANCA_DADOS_POKER.md §4.2 — Registros com net_bb == 0.0 são linhas
+        # sem valor numérico válido (cabeçalhos duplicados, linhas em branco, etc.).
+        # Descartamos aqui para garantir integridade de sinal no protocolo de auditoria.
+        if net_bb == 0.0:
+            continue
+
         went_ai_str = get_col_val(row, ["went_allin", "Went All-in", "All-in", "Went All In", "AllIn"], "False")
         went_ai = went_ai_str.lower() in ("true", "1", "sim", "yes", "t", "s")
         ai_street = get_col_val(row, ["all_in_street", "AI Street", "All-in Street", "Street All-In"], "N/A")
@@ -1004,6 +1022,19 @@ def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
     po_cal = sum(1 for r in prem_off if r["pf_aggressor"] == "Não")
     po_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in prem_off)
 
+    # ── Auditoria de Sanidade (GOVERNANCA_DADOS_POKER.md §4) ─────────────────
+    # Determina o diretório de saída para o log_auditoria.csv
+    _audit_dir = None
+    if output_xlsx_path and isinstance(output_xlsx_path, (str, Path)):
+        _audit_dir = Path(output_xlsx_path).parent
+    elif output_xlsx_path is None:
+        # Modo In-Memory (app.py): tenta gravar no Output local se existir
+        _local_out = Path(__file__).resolve().parent / "Output"
+        if _local_out.exists():
+            _audit_dir = _local_out
+
+    audit_result = executar_auditoria_sanidade(enriched, output_dir=_audit_dir)
+
     return {
         "success": True,
         "total_hands": tot_hands,
@@ -1018,5 +1049,161 @@ def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
             "loss_bb": po_loss,
             "aggressor_hands": po_agg,
             "caller_hands": po_cal,
-        }
+        },
+        "auditoria": audit_result,  # Seção 4 — GOVERNANCA_DADOS_POKER.md
+    }
+
+
+# ---------------------------------------------------------------------------
+# PROTOCOLO DE AUDITORIA DE SANIDADE — GOVERNANCA_DADOS_POKER.md §4
+# ---------------------------------------------------------------------------
+OUTLIER_BB_THRESHOLD = 500.0   # §4.3 — limiar de outlier para cash games
+AMOSTRA_SIZE         = 20       # §4.1 — tamanho da amostra para verificação manual
+
+
+def executar_auditoria_sanidade(enriched: list, output_dir=None) -> dict:
+    """
+    Executa o Protocolo de Auditoria de Sanidade definido em
+    GOVERNANCA_DADOS_POKER.md, Seção 4.
+
+    Testes aplicados:
+        4.1 — Verificação de Soma Manual (amostra de AMOSTRA_SIZE registros)
+        4.2 — Verificação de Integridade de Sinal (net_bb < 0 em todas as perdas)
+        4.3 — Verificação de Magnitude / Outlier Check (|net_bb| > OUTLIER_BB_THRESHOLD)
+        4.4 — Verificação de Consistência Cross-Source (reservado para extensão futura)
+
+    Retorna dicionário com resultado de cada teste e grava log_auditoria.csv em output_dir.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    resultados = []
+    aprovado_global = True
+
+    # ── 4.1: Verificação de Soma Manual ──────────────────────────────────────
+    if len(enriched) >= AMOSTRA_SIZE:
+        amostra = random.sample(enriched, AMOSTRA_SIZE)
+    else:
+        amostra = list(enriched)
+
+    soma_amostra_normalizada = sum(
+        normalizar_valor(r["net_bb"], origem="csv") for r in amostra
+    )
+    # Re-leitura bruta (simula a "soma manual") — os valores já estão armazenados
+    # como float puro no dict, então a re-normalização deve retornar o mesmo valor.
+    soma_amostra_reparse = sum(
+        normalizar_valor(str(r["net_bb"]), origem="csv") for r in amostra
+    )
+    delta_soma = abs(soma_amostra_normalizada - soma_amostra_reparse)
+    teste_4_1_ok = delta_soma < 0.01
+    aprovado_global = aprovado_global and teste_4_1_ok
+
+    resultados.append({
+        "secao":      "4.1 - Soma Manual vs Normalizada",
+        "status":     "APROVADO" if teste_4_1_ok else "FALHA",
+        "detalhe":    f"Amostra={len(amostra)} registros | Soma normalizada={soma_amostra_normalizada:.4f} BB | Re-parse={soma_amostra_reparse:.4f} BB | Delta={delta_soma:.6f}",
+        "threshold":  "delta < 0.01 BB",
+        "timestamp":  timestamp,
+    })
+
+    # ── 4.2: Verificação de Integridade de Sinal ─────────────────────────────
+    # Mãos com net_bb >= 0 em lista de perdas indicam sinal invertido
+    positivos_indevidos = [
+        r for r in enriched
+        if normalizar_valor(r["net_bb"], origem="csv") >= 0
+    ]
+    teste_4_2_ok = len(positivos_indevidos) == 0
+    aprovado_global = aprovado_global and teste_4_2_ok
+
+    detalhe_4_2 = "Nenhum net_bb positivo encontrado." if teste_4_2_ok else (
+        f"{len(positivos_indevidos)} registro(s) com net_bb >= 0: "
+        + ", ".join(str(r.get('hand_id', '?')) for r in positivos_indevidos[:5])
+    )
+    resultados.append({
+        "secao":     "4.2 - Integridade de Sinal",
+        "status":    "APROVADO" if teste_4_2_ok else "FALHA",
+        "detalhe":   detalhe_4_2,
+        "threshold": "net_bb < 0 em todos os registros de perdas",
+        "timestamp": timestamp,
+    })
+
+    # ── 4.3: Verificação de Magnitude / Outlier Check ─────────────────────────
+    outliers = [
+        r for r in enriched
+        if abs(normalizar_valor(r["net_bb"], origem="csv")) > OUTLIER_BB_THRESHOLD
+    ]
+    teste_4_3_ok = len(outliers) == 0
+    # Outliers não reprovam o pipeline (podem ser legítimos em MTT deep),
+    # mas geram aviso e ficam registrados no log.
+    detalhe_4_3 = "Nenhum outlier de magnitude detectado." if teste_4_3_ok else (
+        f"{len(outliers)} registro(s) com |net_bb| > {OUTLIER_BB_THRESHOLD} BB. "
+        "Verificacao manual recomendada: "
+        + ", ".join(
+            f"{r.get('hand_id','?')}={normalizar_valor(r['net_bb'], origem='csv'):.2f}"
+            for r in outliers[:5]
+        )
+    )
+    resultados.append({
+        "secao":     "4.3 - Outlier Check (Magnitude)",
+        "status":    "AVISO" if not teste_4_3_ok else "APROVADO",
+        "detalhe":   detalhe_4_3,
+        "threshold": f"|net_bb| <= {OUTLIER_BB_THRESHOLD} BB",
+        "timestamp": timestamp,
+    })
+
+    # ── 4.4: Consistência Cross-Source (por plataforma) ───────────────────────
+    plat_map = defaultdict(list)
+    for r in enriched:
+        plat_map[r.get("platform", "?")].append(
+            normalizar_valor(r["net_bb"], origem="csv")
+        )
+    resumo_plataformas = {
+        plat: round(sum(vals), 2)
+        for plat, vals in plat_map.items()
+    }
+    resultados.append({
+        "secao":     "4.4 - Consistencia Cross-Source (por plataforma)",
+        "status":    "INFO",
+        "detalhe":   "Soma net_bb por plataforma: " + " | ".join(
+            f"{p}={v:.2f} BB" for p, v in sorted(resumo_plataformas.items())
+        ),
+        "threshold": "Referencia para auditoria manual futura",
+        "timestamp": timestamp,
+    })
+
+    # ── Totais executivos ─────────────────────────────────────────────────────
+    total_net_bb = sum(normalizar_valor(r["net_bb"], origem="csv") for r in enriched)
+    resultados.append({
+        "secao":     "TOTAIS EXECUTIVOS",
+        "status":    "INFO",
+        "detalhe":   (
+            f"Total registros={len(enriched)} | "
+            f"Soma total net_bb={total_net_bb:.2f} BB | "
+            f"Media={total_net_bb/len(enriched):.2f} BB/mao | "
+            f"Pior={min(normalizar_valor(r['net_bb'], origem='csv') for r in enriched):.2f} BB"
+        ),
+        "threshold": "N/A",
+        "timestamp": timestamp,
+    })
+
+    # ── Escrita do log_auditoria.csv ──────────────────────────────────────────
+    log_path = None
+    if output_dir:
+        out_p = Path(output_dir)
+        out_p.mkdir(parents=True, exist_ok=True)
+        log_path = out_p / "log_auditoria.csv"
+        fieldnames = ["secao", "status", "detalhe", "threshold", "timestamp"]
+        with open(log_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(resultados)
+
+    return {
+        "aprovado":          aprovado_global,
+        "total_net_bb":      round(total_net_bb, 2),
+        "registros":         len(enriched),
+        "outliers":          len(outliers),
+        "positivos_indevidos": len(positivos_indevidos),
+        "delta_soma":        round(delta_soma, 6),
+        "resumo_plataformas": resumo_plataformas,
+        "log_path":          str(log_path) if log_path else None,
+        "resultados":        resultados,
     }

@@ -193,9 +193,41 @@ if result:
         df = pd.DataFrame(enriched_data)
 
         # Garante normalização estrita de todas as colunas de valor no DataFrame
+        # conforme GOVERNANCA_DADOS_POKER.md §2 — origem="csv" obrigatório
         for col in ["net_bb", "stack_bb", "spr"]:
             if col in df.columns:
                 df[col] = df[col].apply(lambda v: normalizar_valor(v, origem="csv"))
+
+        # ── PAINEL DE AUDITORIA DE SANIDADE (GOVERNANCA_DADOS_POKER.md §4) ────
+        auditoria = result.get("auditoria", {})
+        if auditoria:
+            aprovado = auditoria.get("aprovado", False)
+            audit_icon = "✅" if aprovado else "❌"
+            audit_label = "APROVADO" if aprovado else "REPROVADO"
+            with st.expander(f"{audit_icon} Auditoria de Sanidade Matemática — {audit_label} (GOVERNANÇA §4)", expanded=not aprovado):
+                a1, a2, a3, a4 = st.columns(4)
+                with a1:
+                    st.metric("Total Net BB", f"{auditoria.get('total_net_bb', 0):,.2f} BB")
+                with a2:
+                    delta_s = auditoria.get('delta_soma', 1)
+                    st.metric("Delta Soma (§4.1)", f"{delta_s:.6f}",
+                              delta="OK" if delta_s < 0.01 else "FALHA")
+                with a3:
+                    pos_indev = auditoria.get('positivos_indevidos', 0)
+                    st.metric("Sinal Inválido (§4.2)", pos_indev,
+                              delta="OK" if pos_indev == 0 else "FALHA")
+                with a4:
+                    outliers_n = auditoria.get('outliers', 0)
+                    st.metric("Outliers >500BB (§4.3)", outliers_n,
+                              delta="OK" if outliers_n == 0 else "AVISO")
+                resultados = auditoria.get("resultados", [])
+                if resultados:
+                    df_audit = pd.DataFrame(resultados)
+                    st.dataframe(df_audit[["secao", "status", "detalhe", "threshold"]],
+                                 use_container_width=True, hide_index=True)
+                log_path = auditoria.get("log_path")
+                if log_path:
+                    st.caption(f"📄 log_auditoria.csv gravado em: `{log_path}`")
 
         # ── CARDS DE MÉTRICAS EXECUTIVAS ─────────────────────────────────────
         st.markdown("#### 📊 2. Resumo Executivo das Perdas (>20BB)")
