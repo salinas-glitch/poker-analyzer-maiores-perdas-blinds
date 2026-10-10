@@ -1,8 +1,8 @@
 # GOVERNANÇA DE DADOS — POKER LEAK DETECTOR
 ## Contrato Inviolável de Tratamento de Dados
 
-> **Versão:** 1.0  
-> **Data de emissão:** 2026-10-07  
+> **Versão:** 1.1  
+> **Data de atualização:** 2026-10-10  
 > **Escopo:** Pipeline `poker_engine.py` · `app.py` · `pipeline_poker.py`  
 > **Status:** 🔴 DOCUMENTO NORMATIVO — Qualquer exceção a estas regras exige justificativa técnica escrita e aprovação explícita.
 
@@ -335,7 +335,83 @@ net_bb = normalizar_valor(parsed_log_value, origem="txt")
 | **Leak** | Padrão recorrente de erro/perda identificável estatisticamente |
 | **Normalização** | Conversão de um valor de string para `float` Python sem perda de precisão |
 | **Origem** | Identificador da fonte do dado (`"csv"` ou `"txt"`) que determina o algoritmo de normalização |
+| **Guard Rail** | Barreira de validação obrigatória que impede que dados inválidos ou poluídos atinjam as camadas de cálculo |
+| **Ruído de Linha** | Registros de sumário, subtotais, médias ou linhas sem identificador de mão que não representam mãos jogadas individuais |
 
 ---
 
-*Este documento é parte integrante do projeto **Poker Leak Detector** e deve ser mantido atualizado a cada alteração no contrato de normalização de dados.*
+## 8. PROTOCOLO DE FILTRAGEM DE RUÍDO E INTEGRIDADE DE LINHA
+
+### 8.1 Objetivo e Fundamentação
+Relatórios gerados por softwares de rastreamento (ex: PT4, Hand2Note) frequentemente intercalam dados individuais de mãos com registros agregados de consolidação (subtotais de posição, médias gerais, rodapés de totalização como *Total* ou *Grand Total*). Além disso, exportações podem conter linhas em branco, quebras de cabeçalho ou registros desprovidos de um identificador unívoco de mão.
+
+Se tais registros atingirem as camadas de normalização e agregação matemática:
+1. **Distorção Catastrófica de Volume e EV:** Totais acumulados são computados cumulativamente com as mãos individuais, multiplicando artificialmente o prejuízo ou distorcendo as taxas horárias e de BB/100.
+2. **Perda de Rastreabilidade:** Mãos que não possuem um *Hand ID* único quebram a consistência relacional com logs brutos de auditoria.
+
+Portanto, a verificação de integridade de linha é um pré-requisito mandatório e inviolável que precede qualquer cálculo no motor.
+
+---
+
+### 8.2 Critérios Mandatórios de Descarte de Ruído
+O motor de processamento **deve descartar imediatamente**, antes de qualquer enriquecimento ou cálculo, toda e qualquer linha que satisfaça pelo menos um dos seguintes critérios:
+
+1. **Termos Sentinela de Resumo / Totalização:**
+   Qualquer linha onde qualquer uma de suas células ou valores contenha (de forma exata ou parcial, case-insensitive) um dos termos:
+   - `'Total'`
+   - `'Summary'`
+   - `'Average'`
+   - `'Averagem'`
+   - `'Grand Total'`
+
+2. **Ausência ou Invalidade de Hand ID:**
+   Qualquer linha cujo campo de identificação de mão (`hand_id`, `Hand #`, `Hand ID`, `Hand Number`, `Game #`, `handid`):
+   - Seja nulo (`None`), vazio (`""`), preenchido apenas por espaços em branco ou valores sentinela nulos (`"nan"`, `"null"`, `"none"`).
+   - Coincida com qualquer um dos termos de resumo listados acima.
+
+3. **Hand ID Duplicado:**
+   Qualquer linha cujo *Hand ID* já tenha sido registrado anteriormente durante o ciclo de ingestão. Cada mão deve ser processada estritamente uma única vez.
+
+---
+
+### 8.3 Guard Rail de Validação Pré-Normalização
+O sistema deve implementar uma barreira arquitetural obrigatória (**Guard Rail**) posicionada estritamente na fase de leitura do arquivo, **antes** de qualquer chamada à função `normalizar_valor`:
+
+```
+Arquivo Bruto (CSV)
+       │
+       ▼
+[ GUARD RAIL DE INTEGRIDADE ]
+(valida termos de ruído + Hand ID único)
+       │
+       ├─────────────────────────┐
+       │ (Válida)                │ (Inválida / Ruído)
+       ▼                         ▼
+[ normalizar_valor(...) ]   [ LOG DE DESCARTE ]
+       │                    (registra motivo, arquivo e amostra)
+       ▼                         │
+Enriquecimento e Métricas        └─► Gravado em log_descarte_linhas.csv
+```
+
+> **REGRA DE OURO:** É terminantemente **PROIBIDO** invocar a função `normalizar_valor` antes de a linha ser expressamente aprovada pelo Guard Rail de Integridade. Registros reprovados pelo Guard Rail não devem constar em `raw_rows` nem em `enriched`.
+
+---
+
+### 8.4 Registro Obrigatório de Log de Descarte (`log_descarte_linhas.csv`)
+Nenhum descarte pode ser silencioso. Para cada linha expurgada pelo Guard Rail, o sistema deve documentar no log estruturado de auditoria:
+- **Timestamp:** Data e hora da tentativa de ingestão.
+- **Arquivo de Origem:** Nome do arquivo CSV onde a anomalia foi detectada.
+- **Linha:** Número da linha no arquivo de origem (se rastreável).
+- **Motivo do Descarte:** Classificação explícita do descarte:
+  - `TERMO_RESUMO_DETECTADO` (ex: linha contendo 'Total', 'Summary', etc.)
+  - `HAND_ID_AUSENTE_OU_INVALIDO` (linha sem identificador de mão)
+  - `HAND_ID_DUPLICADO` (mão já computada anteriormente)
+- **Hand ID:** O valor do identificador detectado (ou vazio se inexistente).
+- **Amostra dos Dados:** Representação textual resumida da linha descartada para rastreabilidade forense.
+
+O arquivo `log_descarte_linhas.csv` deve ser gerado junto ao relatório de saída ou na pasta de auditoria designada.
+
+---
+
+*Este documento é parte integrante do projeto **Poker Leak Detector** e deve ser mantido atualizado a cada alteração no contrato de normalização e integridade de dados.*
+

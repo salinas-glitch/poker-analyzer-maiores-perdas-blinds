@@ -1,9 +1,9 @@
 """
 =============================================================================
-  POKER LEAK ENGINE (MOTOR DE CÁLCULO E ANÁLISE) v2.7
+  POKER LEAK ENGINE (MOTOR DE CÁLCULO E ANÁLISE) v2.8
   Módulo independente de cálculo, avaliação de mãos e geração do dashboard.
-  v2.7: Protocolo de Auditoria de Sanidade (GOVERNANCA_DADOS_POKER.md §4)
-        implementado em executar_auditoria_sanidade() + log_auditoria.csv.
+  v2.8: Guard Rail de Filtragem de Ruído e Integridade de Linha
+        (GOVERNANCA_DADOS_POKER.md §8) + log_descarte_linhas.csv.
 =============================================================================
 """
 
@@ -435,9 +435,73 @@ def enrich_from_logs(target_ids: set, search_dirs: list):
     return enrichment
 
 # ---------------------------------------------------------------------------
+# GUARD RAIL DE INTEGRIDADE E FILTRAGEM DE RUÍDO (GOVERNANÇA §8)
+# ---------------------------------------------------------------------------
+TERMOS_RUIDO_RESUMO = ("grand total", "averagem", "average", "summary", "total")
+
+def validar_integridade_linha(row: dict, seen_ids: set) -> tuple[bool, str, str]:
+    """
+    Guard Rail Obrigatório de Integridade de Linha (GOVERNANCA_DADOS_POKER.md §8).
+    Valida a linha antes de qualquer processamento e antes de chamar normalizar_valor.
+
+    Critérios de Descarte:
+    1. Presença de termos sentinela de resumo ('Total', 'Summary', 'Average', 'Averagem', 'Grand Total')
+       em qualquer valor de célula da linha.
+    2. Ausência, valor nulo, vazio ou inválido no campo de Hand ID.
+    3. Hand ID duplicado (já ingerido anteriormente no ciclo de processamento).
+
+    Retorna:
+        (is_valida: bool, motivo_descarte: str, hand_id: str)
+    """
+    if not isinstance(row, dict):
+        return False, "REGISTRO_NAO_DICIONARIO", ""
+
+    # 1. Validação de termos de resumo/totalização em cada valor da linha
+    for col_nome, valor in row.items():
+        if valor is not None:
+            v_str = str(valor).strip().lower()
+            for termo in TERMOS_RUIDO_RESUMO:
+                if termo in v_str:
+                    return False, f"TERMO_RESUMO_DETECTADO ({termo} na coluna '{col_nome}')", ""
+
+    # 2. Extração e validação estrita do Hand ID
+    hid = get_col_val(row, ["hand_id", "Hand #", "Hand ID", "Hand Number", "Game #", "handid"])
+    if hid is not None:
+        hid = str(hid).strip()
+
+    if not hid or hid.lower() in ("none", "nan", "null", ""):
+        return False, "HAND_ID_AUSENTE_OU_INVALIDO", ""
+
+    # Se o próprio identificador contiver termo de ruído
+    hid_lower = hid.lower()
+    for termo in TERMOS_RUIDO_RESUMO:
+        if termo in hid_lower:
+            return False, f"HAND_ID_CONTEM_TERMO_RESUMO ({termo})", hid
+
+    # 3. Unicidade de Hand ID (descarte de duplicatas)
+    if hid in seen_ids:
+        return False, "HAND_ID_DUPLICADO", hid
+
+    return True, "", hid
+
+def salvar_log_descartes(log_descartes: list, output_dir=None):
+    """Grava o log estruturado de linhas descartadas pelo Guard Rail (§8.4)."""
+    if not output_dir or not log_descartes:
+        return None
+    out_p = Path(output_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    log_path = out_p / "log_descarte_linhas.csv"
+    fieldnames = ["timestamp", "arquivo", "linha", "motivo", "hand_id", "amostra"]
+    with open(log_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(log_descartes)
+    return log_path
+
+# ---------------------------------------------------------------------------
 # INGESTÃO E ENRIQUECIMENTO DOS REGISTROS
 # ---------------------------------------------------------------------------
-def load_and_enrich_data(csv_paths, log_dirs):
+def load_and_enrich_data(csv_paths, log_dirs, log_descartes=None):
     raw_rows = []
     seen_ids = set()
 
@@ -461,11 +525,23 @@ def load_and_enrich_data(csv_paths, log_dirs):
         sep = ";" if sample.count(";") > sample.count(",") else ","
         reader = csv.DictReader(io.StringIO(content), delimiter=sep)
 
-        for r in reader:
-            hid = get_col_val(r, ["hand_id", "Hand #", "Hand ID", "Hand Number", "Game #", "handid"])
-            if hid and hid in seen_ids:
+        for linha_idx, r in enumerate(reader, start=2):
+            # GUARD RAIL OBRIGATÓRIO (GOVERNANCA_DADOS_POKER.md §8):
+            # Valida integridade antes de qualquer operação ou chamada a normalizar_valor.
+            valida, motivo, hid = validar_integridade_linha(r, seen_ids)
+            if not valida:
+                if log_descartes is not None:
+                    log_descartes.append({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "arquivo": p.name,
+                        "linha": linha_idx,
+                        "motivo": motivo,
+                        "hand_id": hid,
+                        "amostra": str({k: v for k, v in list(r.items())[:6] if v}),
+                    })
                 continue
-            if hid: seen_ids.add(hid)
+
+            seen_ids.add(hid)
             raw_rows.append(r)
 
     # Re-parse de logs detalhados
@@ -965,14 +1041,23 @@ def build_aba5_structural(ws, enriched):
 def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
     """
     Função principal do motor de poker:
-    1. Carrega CSVs e enriquece com logs detalhados (aplicando normalizar_valor diferenciado)
-    2. Constrói as 6 abas do dashboard
-    3. Salva o arquivo Excel formatado (em disco ou em memória BytesIO)
-    4. Retorna relatório executivo completo + registros enriquecidos para preview no app
+    1. Aplica Guard Rail de Integridade e filtragem de ruído (§8)
+    2. Carrega CSVs e enriquece com logs detalhados (aplicando normalizar_valor diferenciado)
+    3. Constrói as 6 abas do dashboard
+    4. Salva o arquivo Excel formatado (em disco ou em memória BytesIO)
+    5. Retorna relatório executivo completo + registros enriquecidos para preview no app
     """
-    enriched = load_and_enrich_data(csv_paths, log_dirs)
+    log_descartes = []
+    enriched = load_and_enrich_data(csv_paths, log_dirs, log_descartes=log_descartes)
     if not enriched:
-        return {"success": False, "error": "Nenhum registro válido de mãos encontrado nos arquivos CSV fornecidos."}
+        return {
+            "success": False,
+            "error": "Nenhum registro válido de mãos encontrado nos arquivos CSV fornecidos.",
+            "descartes": {
+                "total": len(log_descartes),
+                "itens": log_descartes,
+            }
+        }
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # remove default sheet
@@ -1022,8 +1107,8 @@ def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
     po_cal = sum(1 for r in prem_off if r["pf_aggressor"] == "Não")
     po_loss = sum(normalizar_valor(r["net_bb"], origem="csv") for r in prem_off)
 
-    # ── Auditoria de Sanidade (GOVERNANCA_DADOS_POKER.md §4) ─────────────────
-    # Determina o diretório de saída para o log_auditoria.csv
+    # ── Auditoria de Sanidade e Registro de Descartes (GOVERNANÇA §4 e §8) ────
+    # Determina o diretório de saída para log_auditoria.csv e log_descarte_linhas.csv
     _audit_dir = None
     if output_xlsx_path and isinstance(output_xlsx_path, (str, Path)):
         _audit_dir = Path(output_xlsx_path).parent
@@ -1033,7 +1118,8 @@ def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
         if _local_out.exists():
             _audit_dir = _local_out
 
-    audit_result = executar_auditoria_sanidade(enriched, output_dir=_audit_dir)
+    log_descarte_file = salvar_log_descartes(log_descartes, output_dir=_audit_dir)
+    audit_result = executar_auditoria_sanidade(enriched, output_dir=_audit_dir, log_descartes=log_descartes)
 
     return {
         "success": True,
@@ -1050,7 +1136,12 @@ def run_poker_leak_engine(csv_paths, log_dirs, output_xlsx_path=None):
             "aggressor_hands": po_agg,
             "caller_hands": po_cal,
         },
-        "auditoria": audit_result,  # Seção 4 — GOVERNANCA_DADOS_POKER.md
+        "auditoria": audit_result,  # Seções 4 e 8 — GOVERNANCA_DADOS_POKER.md
+        "descartes": {
+            "total": len(log_descartes),
+            "log_path": str(log_descarte_file) if log_descarte_file else None,
+            "itens": log_descartes,
+        },
     }
 
 
@@ -1061,16 +1152,17 @@ OUTLIER_BB_THRESHOLD = 500.0   # §4.3 — limiar de outlier para cash games
 AMOSTRA_SIZE         = 20       # §4.1 — tamanho da amostra para verificação manual
 
 
-def executar_auditoria_sanidade(enriched: list, output_dir=None) -> dict:
+def executar_auditoria_sanidade(enriched: list, output_dir=None, log_descartes=None) -> dict:
     """
     Executa o Protocolo de Auditoria de Sanidade definido em
-    GOVERNANCA_DADOS_POKER.md, Seção 4.
+    GOVERNANCA_DADOS_POKER.md, Seção 4 e Seção 8.
 
     Testes aplicados:
         4.1 — Verificação de Soma Manual (amostra de AMOSTRA_SIZE registros)
         4.2 — Verificação de Integridade de Sinal (net_bb < 0 em todas as perdas)
         4.3 — Verificação de Magnitude / Outlier Check (|net_bb| > OUTLIER_BB_THRESHOLD)
         4.4 — Verificação de Consistência Cross-Source (reservado para extensão futura)
+        8.0 — Protocolo de Filtragem de Ruído e Integridade de Linha
 
     Retorna dicionário com resultado de cada teste e grava log_auditoria.csv em output_dir.
     """
@@ -1169,6 +1261,16 @@ def executar_auditoria_sanidade(enriched: list, output_dir=None) -> dict:
         "timestamp": timestamp,
     })
 
+    # ── 8.0: Filtragem de Ruído e Integridade de Linha (§8) ──────────────────
+    n_descartes = len(log_descartes) if log_descartes else 0
+    resultados.append({
+        "secao":     "8.0 - Filtragem de Ruido e Integridade (Guarda §8)",
+        "status":    "APROVADO",
+        "detalhe":   f"{n_descartes} linha(s) de ruido/resumo descartada(s) pelo Guard Rail antes de normalizar_valor.",
+        "threshold": "Descarte preventivo de totais, medias e registros sem ID unico",
+        "timestamp": timestamp,
+    })
+
     # ── Totais executivos ─────────────────────────────────────────────────────
     total_net_bb = sum(normalizar_valor(r["net_bb"], origem="csv") for r in enriched)
     resultados.append({
@@ -1204,6 +1306,7 @@ def executar_auditoria_sanidade(enriched: list, output_dir=None) -> dict:
         "positivos_indevidos": len(positivos_indevidos),
         "delta_soma":        round(delta_soma, 6),
         "resumo_plataformas": resumo_plataformas,
+        "linhas_descartadas": n_descartes,
         "log_path":          str(log_path) if log_path else None,
         "resultados":        resultados,
     }

@@ -204,8 +204,8 @@ if result:
             aprovado = auditoria.get("aprovado", False)
             audit_icon = "✅" if aprovado else "❌"
             audit_label = "APROVADO" if aprovado else "REPROVADO"
-            with st.expander(f"{audit_icon} Auditoria de Sanidade Matemática — {audit_label} (GOVERNANÇA §4)", expanded=not aprovado):
-                a1, a2, a3, a4 = st.columns(4)
+            with st.expander(f"{audit_icon} Auditoria de Sanidade Matemática — {audit_label} (GOVERNANÇA §4 e §8)", expanded=not aprovado):
+                a1, a2, a3, a4, a5 = st.columns(5)
                 with a1:
                     st.metric("Total Net BB", f"{auditoria.get('total_net_bb', 0):,.2f} BB")
                 with a2:
@@ -220,6 +220,10 @@ if result:
                     outliers_n = auditoria.get('outliers', 0)
                     st.metric("Outliers >500BB (§4.3)", outliers_n,
                               delta="OK" if outliers_n == 0 else "AVISO")
+                with a5:
+                    descartes_n = auditoria.get('linhas_descartadas', 0)
+                    st.metric("Ruído Descartado (§8)", descartes_n,
+                              delta=f"{descartes_n} linhas" if descartes_n > 0 else "OK")
                 resultados = auditoria.get("resultados", [])
                 if resultados:
                     df_audit = pd.DataFrame(resultados)
@@ -228,6 +232,11 @@ if result:
                 log_path = auditoria.get("log_path")
                 if log_path:
                     st.caption(f"📄 log_auditoria.csv gravado em: `{log_path}`")
+                descartes_info = result.get("descartes", {})
+                if descartes_info and descartes_info.get("itens"):
+                    with st.expander(f"🛡️ Detalhes das {descartes_info.get('total', 0)} Linhas Descartadas pelo Guard Rail (§8)"):
+                        st.dataframe(pd.DataFrame(descartes_info.get("itens")),
+                                     use_container_width=True, hide_index=True)
 
         # ── CARDS DE MÉTRICAS EXECUTIVAS ─────────────────────────────────────
         st.markdown("#### 📊 2. Resumo Executivo das Perdas (>20BB)")
